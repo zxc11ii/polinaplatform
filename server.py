@@ -12,6 +12,7 @@ import sqlite3
 import time
 import learning
 import academy
+import subjects
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -86,7 +87,9 @@ def initialize():
             print('Пароли первого входа: data/first-login.txt', flush=True)
         learning.migrate(db)
         academy.migrate(db)
+        subjects.migrate(db)
         academy.seed(db)
+        subjects.seed(db)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -145,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(403, {'error': 'Нет доступа'})
             filename = ROOT / 'uploads' / Path(path).name
         else:
-            files = {'/': 'index.html', '/app.js': 'app.js', '/learning.js': 'learning.js', '/style.css': 'style.css', '/learning.css':'learning.css', '/academy.js':'academy.js', '/academy.css':'academy.css', '/icons.js':'icons.js', '/favicon.svg': 'favicon.svg'}
+            files = {'/': 'index.html', '/app.js': 'app.js', '/learning.js': 'learning.js', '/style.css': 'style.css', '/learning.css':'learning.css', '/academy.js':'academy.js', '/academy.css':'academy.css', '/icons.js':'icons.js', '/favicon.svg': 'logo.svg', '/logo.svg':'logo.svg', '/method.js':'method.js', '/method.css':'method.css'}
             if path not in files:
                 return self.send(404, {'error': 'Не найдено'})
             filename = ROOT / 'web' / files[path]
@@ -237,6 +240,7 @@ class Handler(BaseHTTPRequestHandler):
         if not u:
             return self.send(401, {'error': 'Войдите в аккаунт'})
         meta = academy.config_validate(db, b, learning) if path == '/api/assignments' or (path == '/api/edit-item' and b.get('entity') == 'assignment') else None
+        subject_plan = subjects.prepare(db,path,b)
         handled = academy.dispatch(db, u, path, b, ROOT, self.allowed, learning)
         if handled is None:
             handled = learning.dispatch(db, u, path, b, ROOT, self.allowed)
@@ -244,6 +248,7 @@ class Handler(BaseHTTPRequestHandler):
             item_id = int(b['id']) if b.get('id') else db.execute('SELECT last_insert_rowid()').fetchone()[0]
             db.execute('UPDATE assignments SET category=?,exam_config=? WHERE id=?',(meta[0],json.dumps(meta[1],ensure_ascii=False),item_id))
         if handled is not None:
+            if handled[0]<300: subjects.save(db,subject_plan,b)
             db.commit()
             return self.send(*handled)
         if path == '/api/logout':
@@ -310,6 +315,8 @@ class Handler(BaseHTTPRequestHandler):
                 datetime.fromisoformat(b['starts'])
                 if not student or urlparse(b['url']).scheme != 'https' or not 10 <= int(b['minutes']) <= 180: raise ValueError()
                 db.execute('INSERT INTO lessons(title,starts,minutes,student_id,url,notes) VALUES(?,?,?,?,?,?)', (title,b['starts'],int(b['minutes']),student,b['url'][:2000],str(b.get('notes',''))[:3000]))
+            subjects.save(db,subject_plan,b)
+            db.commit()
             return self.send(201, {'ok': True})
         self.send(404, {'error': 'Не найдено'})
 
@@ -329,5 +336,5 @@ if __name__ == '__main__':
     parser.add_argument('--host', default='127.0.0.1')
     args = parser.parse_args()
     initialize()
-    print(f'Polina English Studio: http://{args.host}:{args.port}', flush=True)
+    print(f'The Lesson Method: http://{args.host}:{args.port}', flush=True)
     StudioServer((args.host,args.port),Handler).serve_forever()

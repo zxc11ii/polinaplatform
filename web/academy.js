@@ -42,4 +42,4 @@ window.addEventListener('submit',async event=>{const form=event.target;const own
 
 function renderResult(){academyState=null;studioLearning.renderResult();}
 
-load();
+// Boot after The Lesson Method shell.

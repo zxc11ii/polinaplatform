@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory() as temp:
         studio.academy.sync(db)
         state={table:[dict(r) for r in db.execute('SELECT * FROM '+table)] for table in ('assignments','attempts','materials','lessons','courses','course_reads','vocabulary','word_reviews','comments','notifications','mistakes','retry_grants')}
         state['users']=[dict(r) for r in db.execute('SELECT id,name,login,role,grade,timezone FROM users')]
-        state.update(version=1,files={},timezones=studio.learning.TIMEZONES)
+        state.update(version=2,files={},timezones=studio.learning.TIMEZONES)
 for file in (root/'web').iterdir():
     if file.is_file():shutil.copy2(file,output/file.name)
 html=(output/'index.html').read_text(encoding='utf-8').replace('href="/','href="./').replace('src="/','src="./')

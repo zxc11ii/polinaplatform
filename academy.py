@@ -87,8 +87,8 @@ def config_validate(db,b,learning):
 
 
 def freeze(db,id,a):
-    db.execute('UPDATE attempts SET category_snapshot=?,exam_snapshot=?,mistake_links_snapshot=?,academy_frozen=1 WHERE id=?',
-        (a['category'],a['exam_config'],a['mistake_links'],id))
+    db.execute('UPDATE attempts SET category_snapshot=?,exam_snapshot=?,mistake_links_snapshot=?,subject_snapshot=?,academy_frozen=1 WHERE id=?',
+        (a['category'],a['exam_config'],a['mistake_links'],a['subject'],id))
 
 
 def windows(attempt):
@@ -123,6 +123,7 @@ def notify(db,user,key,title,body='',page='notifications'):
 def sync(db):
     # Recompute error resolution from immutable attempts, so a corrected teacher mark is respected.
     db.execute('UPDATE mistakes SET resolved=1')
+    db.execute('UPDATE mistakes SET subject=(SELECT subject_snapshot FROM attempts WHERE attempts.id=mistakes.attempt_id)')
     outcomes={};links=[]
     for a in db.execute("SELECT * FROM attempts WHERE submitted IS NOT NULL ORDER BY started,id").fetchall():
         if a['status']=='pending':
@@ -132,14 +133,14 @@ def sync(db):
         if a['reviewed_at']:notify(db,a['user_id'],f"review:{a['id']}:{a['reviewed_at']}",'Полина проверила работу',a['title_snapshot'],'progress')
         qs=json.loads(a['snapshot']);answers=json.loads(a['answers'] or '[]');marks=json.loads(a['marks']);ml=json.loads(a['mistake_links_snapshot'])
         for i,q in enumerate(qs):
-            earned=question_score(q,answers[i] if i<len(answers) else '',marks,i);correct=earned>=q.get('points',1);key=(a['user_id'],fp(q))
+            earned=question_score(q,answers[i] if i<len(answers) else '',marks,i);correct=earned>=q.get('points',1);key=(a['user_id'],a['subject_snapshot'],fp(q))
             outcomes[key]=correct
             if not correct:
-                db.execute('''INSERT INTO mistakes(user_id,attempt_id,question_index,fingerprint,topic,prompt,resolved) VALUES(?,?,?,?,?,?,0)
-                    ON CONFLICT(attempt_id,question_index) DO UPDATE SET resolved=0''',(a['user_id'],a['id'],i,key[1],q.get('topic','Времена'),q['prompt']))
+                db.execute('''INSERT INTO mistakes(user_id,attempt_id,question_index,fingerprint,topic,prompt,resolved,subject) VALUES(?,?,?,?,?,?,0,?)
+                    ON CONFLICT(attempt_id,question_index) DO UPDATE SET resolved=0''',(a['user_id'],a['id'],i,key[2],q.get('topic','Времена'),q['prompt'],a['subject_snapshot']))
             if str(i) in ml:links.append((int(ml[str(i)]),correct,a['user_id']))
-    for (user,fingerprint),correct in outcomes.items():
-        if correct:db.execute('UPDATE mistakes SET resolved=1 WHERE user_id=? AND fingerprint=?',(user,fingerprint))
+    for (user,subject,fingerprint),correct in outcomes.items():
+        if correct:db.execute('UPDATE mistakes SET resolved=1 WHERE user_id=? AND subject=? AND fingerprint=?',(user,subject,fingerprint))
     for id,correct,user in links:
         if correct:db.execute('UPDATE mistakes SET resolved=1 WHERE id=? AND user_id=?',(id,user))
 
@@ -153,13 +154,13 @@ def stats(db,user):
             topic=q.get('topic','Времена');earned=question_score(q,answers[i] if i<len(answers) else '',marks,i);maximum=q.get('points',1)
             row=per.setdefault(topic,dict(earned=0,total=0));row['earned']+=earned;row['total']+=maximum
             sec=sections.setdefault(q.get('section') or 'Практика',dict(earned=0,total=0));sec['earned']+=earned;sec['total']+=maximum
-        for topic,row in per.items():topics.setdefault(topic,[]).append({**row,'attempt':a['id'],'date':a['submitted']})
-        if a['category_snapshot']=='diagnostic':diagnostic.append(dict(id=a['id'],title=a['title_snapshot'],topics=per,date=a['submitted']))
-        if a['category_snapshot']=='mock':exams.append(dict(id=a['id'],title=a['title_snapshot'],score=a['score'],total=a['total'],sections=sections,date=a['submitted']))
+        for topic,row in per.items():topics.setdefault((a['subject_snapshot'],topic),[]).append({**row,'attempt':a['id'],'date':a['submitted']})
+        if a['category_snapshot']=='diagnostic':diagnostic.append(dict(id=a['id'],title=a['title_snapshot'],topics=per,date=a['submitted'],subject=a['subject_snapshot']))
+        if a['category_snapshot']=='mock':exams.append(dict(id=a['id'],title=a['title_snapshot'],score=a['score'],total=a['total'],sections=sections,date=a['submitted'],subject=a['subject_snapshot']))
     result=[]
-    for topic,history in topics.items():
+    for (subject,topic),history in topics.items():
         recent=history[-5:];total=sum(r['total'] for r in recent);earned=sum(r['earned'] for r in recent)
-        result.append(dict(topic=topic,percent=round(earned/total*100) if total else 0,evidence=len(history),history=history))
+        result.append(dict(subject=subject,topic=topic,percent=round(earned/total*100) if total else 0,evidence=len(history),history=history))
     result.sort(key=lambda x:x['percent'])
     return dict(topics=result,diagnostics=diagnostic,exams=exams)
 
@@ -288,11 +289,13 @@ def dispatch(db,user,path,b,root,allowed,learning):
         db.execute('UPDATE vocabulary SET stage=?,next_due=? WHERE id=?',(stage,time.time()+delta,row['id']));return 200,{'ok':True}
     if route=='mistakes-practice':
         if teacher:return 403,{'error':'Тренировку запускает ученик'}
-        sync(db);errors=db.execute('SELECT * FROM mistakes WHERE user_id=? AND resolved=0 ORDER BY id DESC LIMIT 6',(user['id'],)).fetchall()
+        sync(db)
+        subject=b.get('subject') or (db.execute('SELECT subject FROM mistakes WHERE user_id=? AND resolved=0 ORDER BY id DESC LIMIT 1',(user['id'],)).fetchone() or {'subject':'en'})['subject']
+        errors=db.execute('SELECT * FROM mistakes WHERE user_id=? AND resolved=0 AND subject=? ORDER BY id DESC LIMIT 6',(user['id'],subject)).fetchall()
         if not errors:return 409,{'error':'Нет ошибок для повторения'}
         pool=[]
         for a in db.execute("SELECT * FROM assignments WHERE archived=0 AND category IN ('practice','diagnostic')"):
-            if allowed(a,user):pool.extend(json.loads(a['questions']))
+            if allowed(a,user) and a['subject']==subject:pool.extend(json.loads(a['questions']))
         selected=[];links={};used=set();novel=0
         for error in errors:
             alternatives=[q for q in pool if q.get('topic','Времена')==error['topic'] and fp(q)!=error['fingerprint'] and fp(q) not in used and q.get('type','choice') in ('choice','text')]
@@ -300,7 +303,8 @@ def dispatch(db,user,path,b,root,allowed,learning):
             else:
                 source=db.execute('SELECT snapshot FROM attempts WHERE id=?',(error['attempt_id'],)).fetchone();q=dict(json.loads(source['snapshot'])[error['question_index']])
             used.add(fp(q));links[str(len(selected))]=error['id'];selected.append(q)
-        cursor=db.execute("INSERT INTO assignments(title,description,minutes,grade,student_id,questions,created,category,mistake_links) VALUES(?,?,?,?,?,?,?,?,?)",('Работа над ошибками','Похожие задания: '+str(novel)+'. Остальные — повторение исходных.',15,user['grade'],user['id'],json.dumps(selected,ensure_ascii=False),time.time(),'mistakes',json.dumps(links)))
+        cursor=db.execute("INSERT INTO assignments(title,description,minutes,grade,student_id,questions,created,category,mistake_links) VALUES(?,?,?,?,?,?,?,?,?)",('Папка ошибок — практика','Похожие задания: '+str(novel)+'. Остальные — повторение исходных.',15,user['grade'],user['id'],json.dumps(selected,ensure_ascii=False),time.time(),'mistakes',json.dumps(links)))
+        db.execute('UPDATE assignments SET subject=? WHERE id=?',(subject,cursor.lastrowid))
         return 201,{'id':cursor.lastrowid,'novel':novel}
     if route in ('comments','comment-post'):
         assignment=db.execute('SELECT * FROM assignments WHERE id=?',(int(b['id']),)).fetchone()
