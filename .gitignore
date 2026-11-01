@@ -18,3 +18,5 @@ venv/
 Thumbs.db
 docs/update-v*.json
 docs/reference-evidence.json
+
+_site/
